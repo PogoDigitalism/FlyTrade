@@ -8,15 +8,16 @@ local Cooldown = require(ReplicatedStorage:WaitForChild('CooldownUtils'))
 
 local Remotes = ReplicatedStorage:WaitForChild('RemoteEvents'):WaitForChild('Trading')
 
+
 local GameSpecific = require(script.GameSpecific)
 
 local Trade = {}
 Trade.__index = Trade
 
-setmetatable(
-	Trade,
-	GameSpecific
-)
+--setmetatable(
+--	Trade,
+--	GameSpecific
+--)
 
 local Types = require(ReplicatedStorage:WaitForChild('Trading'):WaitForChild('SharedTypes'))
 local Constants = require(ReplicatedStorage:WaitForChild('Trading'):WaitForChild('SharedConstants'))
@@ -32,7 +33,7 @@ local stage_order = {
 	"ready",
 	"confirm",
 	"counting_down",
-	"pending",
+	"pending", -- TODO if at this stage; cancel is not possible
 	"completed",
 }
 
@@ -74,7 +75,12 @@ function Trade.new(instigator: Player)
 	self.buddy_data = nil
 	
 	self.locked = false
-	self.cooldown = Cooldown.new(3)
+	self.cooldown = Cooldown.new(
+		3,
+		function()
+			self.locked = false
+		end
+	)
 	
 	self.role_data = {
 		["instigator"] = self.instigator_data,
@@ -215,6 +221,12 @@ function Trade._completeTrade(self: cls): boolean
 	-- TODO remove units and items from both sides, then insert them
 	
 	-- TODO add player statistics/trading history
+	Remotes.TradeConfirmed:FireClient(
+		self.instigator
+	)
+	Remotes.TradeConfirmed:FireClient(
+		self.buddy
+	)
 end
 
 function Trade._finalize(self: cls)
@@ -296,7 +308,7 @@ function Trade.cancelAdvance(self: cls, role: Types.Role): boolean
 	return false
 end
 
-function Trade.cancelTrade(self: cls): boolean
+function Trade.cancelTrade(self: cls, role: Types.Role?): boolean
 	if table.find(stage_order, self.stage) > 4 then
 		return false
 	end
@@ -306,6 +318,20 @@ function Trade.cancelTrade(self: cls): boolean
 			self._countdown_thread
 		)
 		self._countdown_thread = nil
+	end
+
+	if role then
+		local opponent = self.getOpponent(role)
+		Remotes.TradeCancelled:FireClient(
+			self[opponent]
+		)
+	else
+		Remotes.TradeCancelled:FireClient(
+			self.instigator
+		)
+		Remotes.TradeCancelled:FireClient(
+			self.buddy
+		)
 	end
 	self:destroyClass()
 	-- TODO CLEAN UP HERE
