@@ -74,12 +74,7 @@ function Trade.new(instigator: Player)
 	self.buddy_data = nil
 	
 	self.locked = false
-	self.cooldown = Cooldown.new(
-		3,
-		function()
-			self.locked = false
-		end
-	)
+	self.cooldown = Cooldown.new(3)
 	
 	self.role_data = {
 		["instigator"] = self.instigator_data,
