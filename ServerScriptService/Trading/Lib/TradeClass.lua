@@ -32,7 +32,7 @@ local stage_order = {
 	"ready",
 	"confirm",
 	"counting_down",
-	"pending", -- TODO if at this stage; cancel is not possible
+	"pending",
 	"completed",
 }
 
