@@ -14,10 +14,10 @@ local GameSpecific = require(script.GameSpecific)
 local Trade = {}
 Trade.__index = Trade
 
---setmetatable(
---	Trade,
---	GameSpecific
---)
+setmetatable(
+	Trade,
+	GameSpecific
+)
 
 local Types = require(ReplicatedStorage:WaitForChild('Trading'):WaitForChild('SharedTypes'))
 local Constants = require(ReplicatedStorage:WaitForChild('Trading'):WaitForChild('SharedConstants'))
@@ -33,7 +33,7 @@ local stage_order = {
 	"ready",
 	"confirm",
 	"counting_down",
-	"pending", -- TODO if at this stage; cancel is not possible
+	"pending",
 	"completed",
 }
 
