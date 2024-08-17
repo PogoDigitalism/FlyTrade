@@ -213,8 +213,7 @@ function Trade.invokeTrade(self: cls, buddy: Player): boolean
 	
 	local accepted = Remotes.InvokeTrade:InvokeClient(buddy, self.instigator.UserId)
 	if typeof(accepted) ~= 'boolean' then return false, 500 end
-	-- TODO CHECK IF INSTIGATOR IS IN TRADE FROM ANOTHER INVOKE?
-	-- TODO CHECK IF BUDDY IS ALREADY IN TRADE?
+
 	local buddy_trades = Trade.GetTrades(buddy)
 	for _, trade in buddy_trades do
 		if trade.in_progress then
