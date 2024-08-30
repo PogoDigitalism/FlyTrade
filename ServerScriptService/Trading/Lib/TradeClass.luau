@@ -24,7 +24,8 @@ local Constants = require(ReplicatedStorage:WaitForChild('Trading'):WaitForChild
 export type tradeStage = "init" | "ready" | "ready_counting_down" | "confirm" | "confirm_counting_down" | "pending" | "completed" | "cancelled"
 export type offerType = {
 	asset: string,
-	type: Types.TradableType
+	type: Types.TradableType,
+	amount: number
 }
 
 local stage_order = {
@@ -62,6 +63,7 @@ function Trade.unregisterTrade(ID: number)
 end
 
 function Trade.unregisterPlayerTrades(player: Player, exception_ID: number?)
+	local active_trades_copy = Trade.active_trades
 	for i, trade in Trade.active_trades do
 		local p1, p2 = trade:involvedPlayers()
 		if not (exception_ID and trade.ID == exception_ID) and (p1 == player or p2 == player) then
@@ -74,9 +76,7 @@ Trade.ID = 0
 
 function Trade.GetTradesOverview()
 	warn("-----------------")
-	local count = 0
 	for _, trade in Trade.active_trades do
-		count += 1
 		print(trade.ID, "|", trade.stage, "|" ,trade:involvedPlayers())
 	end
 	warn("-----------------")
@@ -129,9 +129,13 @@ function Trade.new(instigator: Player)
 	
 	self.instigator = instigator
 	self.instigator_data = PlayerDataService.GetPlayerDataInstance(instigator)
+
+	local data = self.instigator_data:GetInventorySize()
+	self.instigator_unit_size_left = data.size - data.units
 	
 	self.buddy = nil :: Player
 	self.buddy_data = nil
+	self.buddy_unit_size_left = nil
 	
 	self.in_progress = false
 	self.locked = false
@@ -192,6 +196,12 @@ export type cls = typeof(
 function Trade.destroyClass(self: cls)
 	Trade.unregisterTrade(self.ID)
 	
+	if self.role_data.buddy.trading then
+		self.role_data.buddy.trading = false
+	end
+		
+	self.role_data.instigator.trading = false
+
 	self.in_progress = false
 	self.closed = true
 	self.cooldown.destroy(self)
@@ -211,50 +221,89 @@ end
 function Trade.invokeTrade(self: cls, buddy: Player): boolean
 	if self.stage ~= "init" then return false end
 	
-	local accepted = Remotes.InvokeTrade:InvokeClient(buddy, self.instigator.UserId)
-	if typeof(accepted) ~= 'boolean' then return false, 500 end
+	self.buddy = buddy
 
-	local buddy_trades = Trade.GetTrades(buddy)
-	for _, trade in buddy_trades do
-		if trade.in_progress then
-			return false, 410
-		end
+	local accepted = Remotes.InvokeTrade:InvokeClient(buddy, self.instigator.UserId)
+	if typeof(accepted) ~= 'boolean' then
+		Trade.unregisterTrade(self.ID)
+		self:destroyClass()
+
+		return false, 500 
 	end
+	
+
+	print('accepted?', accepted, self)
+
+	
+	if not accepted then
+		print('NOT ACCEPTED! or data is not loaded')
+		Trade.unregisterTrade(self.ID)
+		self:destroyClass()
+
+		return false, 411
+	end
+
+	self.buddy_data = PlayerDataService.GetPlayerDataInstance(buddy)
+
 	local instigator_trades = Trade.GetTrades(self.instigator)
 	for _, trade in instigator_trades do
 		if trade.in_progress then
+			print('instigator trade already in progress', self.instigator)
+
+			Remotes.TradeCancelled:FireClient(buddy, 410)
+			Trade.unregisterTrade(self.ID)
+			self:destroyClass()
+
 			return false, 410
 		end
 	end
+	
+	
+	local buddy_trades = Trade.GetTrades(buddy)
+	for _, trade in buddy_trades do
+		if trade.in_progress then
+			print('buddy trade already in progress', self.buddy)
+			
+			Remotes.TradeCancelled:FireClient(buddy, 410)
+			Trade.unregisterTrade(self.ID)
+			self:destroyClass()
+
+			return false, 410
+		end
+	end
+	
 
 	if self.closed then
-		Remotes.TradeCancelled:FireClient(buddy)
+		Remotes.TradeCancelled:FireClient(buddy, 500)
+
+		Trade.unregisterTrade(self.ID)
+		self:destroyClass()
+
 		return false, 500
 	end
 
-	Trade.unregisterPlayerTrades(
-		buddy,
-		self.ID
-	)
-	Trade.unregisterPlayerTrades(
-		self.instigator,
-		self.ID
-	)
-	
-	self.buddy = buddy
-	self.buddy_data = PlayerDataService.GetPlayerDataInstance(buddy)
-	if not accepted or not self.buddy_data.data_loaded then 
-		self:destroyClass()
-		return false, 411
-	end
+	print('did it get here?')
+	--Trade.unregisterPlayerTrades(
+	--	buddy,
+	--	self.ID
+	--)
+	--Trade.unregisterPlayerTrades(
+	--	self.instigator,
+	--	self.ID
+	--)
+
+	local data = self.buddy_data:GetInventorySize()
+	self.buddy_unit_size_left = data.size - data.units
+
 	self.role_data.buddy = self.buddy_data
 	
 	self.in_progress = true
 	self.stage =  "ready"
+
+	print('did it get here?')
 	
-	--Remotes.InvokeAccepted:FireClient(
-	--	self.instigator
-	--)
+	self.role_data.buddy.trading = true
+	self.role_data.instigator.trading = true
 
 	return true, 200
 end
@@ -275,10 +324,10 @@ end
 function Trade._ownsAssets(self: cls): boolean
 	-- TODO do asset ownership check
 	for role, offers in self.offers do
-		local player_data = self.role_data.instigator -- TODO change (intellisense)
+		local player_data = self.role_data[role] -- TODO change (intellisense)
 
 		for index, offer: offerType in offers do
-			local owns = self.hasAsset(player_data, offer.asset, offer.type)
+			local owns = self.hasAsset(player_data, offer.asset, offer.type, offer.amount)
 			if not owns then return false end
 		end
 	end
@@ -320,43 +369,68 @@ function Trade._completeTrade(self: cls): boolean
 		return false
 	end
 	-- remote items first
-	local offers_copy = self.offers
+	print(self.offers)
+	
 	for role, offers in self.offers do
-		local player_data = self.role_data.instigator -- TODO change (intellisense)
+		local player_data = self.role_data[role] -- TODO change (intellisense)
 		
 		for index, offer: offerType in offers do
-			self.removeAsset(player_data, offer.asset, offer.type)
+			print(offer)
+			self.removeAsset(player_data, offer.asset, offer.type, offer.amount)
 		end
 	end
 	
 	-- insert from other side
 	for role, offers in self.offers do
-		local player_data = self.role_data.instigator -- TODO change (intellisense)
+		local player_data = self.role_data[role] -- TODO change (intellisense)
 
 		local opponent = self.getOpponent(role)
 		for index, offer: offerType in self.offers[opponent] do
-			self.addAsset(player_data, offer.asset, offer.type)
+			self.addAsset(player_data, offer.asset, offer.type, offer.amount)
 		end
-	end	
+	end
+	
 	
 	self.in_progress = false
 	self.stage = "completed"
 	-- TODO remove units and items from both sides, then insert them
-	
-	-- TODO add player statistics/trading history
+
 	Remotes.TradeConfirmed:FireClient(
 		self.instigator
 	)
 	Remotes.TradeConfirmed:FireClient(
 		self.buddy
 	)
+
+	self.role_data.instigator:AddTradeToHistory({
+		buddy_id = self.buddy.UserId,
+		date = DateTime.now().UnixTimestamp,
+		
+		offer = self.offers
+	})
+	self.role_data.buddy:AddTradeToHistory({
+		buddy_id = self.instigator.UserId,
+		date = DateTime.now().UnixTimestamp,
+
+		offer = self.offers
+	})
 	
-end
+	
+	-- TODO add player statistics/trading history
 
-function Trade._finalize(self: cls)
-	-- TODO clear Trade class, cleanup etc
-end
+	local instigator = self.instigator
+	local buddy = self.buddy
+	local offers = self.offers
+	self.logTrade({
+			instigator = instigator,
+			buddy = buddy,
+			
+			offers = offers,
+			offer_values = self.offers_value
+	})
 
+	self:destroyClass()
+end
 
 function Trade.readyCountdown(self: cls)
 	self.stage = "ready_counting_down"
@@ -368,12 +442,12 @@ function Trade.confirmCountdown(self: cls)
 	self.stage = "confirm_counting_down"
 
 	task.wait(
-		Constants.COMPLETE_TRADE_TIME
+		Constants.CONFIRMATION_WAIT_TIME
 	)
 	self.stage = "pending"
 
 	task.wait(
-		Constants.CONFIRMATION_WAIT_TIME
+		Constants.COMPLETE_TRADE_TIME
 	)
 	self:_clearAdvancement()
 	
@@ -382,7 +456,7 @@ end
 
 
 function Trade.submitAdvance(self: cls, role: Types.Role): boolean
-	if table.find(stage_order, self.stage) > 5 and not self.stage_advancement[role] then
+	if table.find(stage_order, self.stage) > 5 or self.stage_advancement[role] then
 		return false
 	end
 
@@ -415,8 +489,7 @@ function Trade.submitAdvance(self: cls, role: Types.Role): boolean
 			self:_clearOffers()
 			self:_clearAdvancement()
 
-			print(self)
-			return false 
+			return false
 		end
 		
 		self._countdown_thread = coroutine.create(
@@ -428,12 +501,11 @@ function Trade.submitAdvance(self: cls, role: Types.Role): boolean
 		)
 	end
 
-	print(self)
 	return true
 end
 
 function Trade.cancelAdvance(self: cls, role: Types.Role): boolean
-	if table.find(stage_order, self.stage) > 5 and self.stage_advancement[role] then
+	if table.find(stage_order, self.stage) > 5 or not self.stage_advancement[role] then
 		return false
 	end
 	
@@ -441,6 +513,7 @@ function Trade.cancelAdvance(self: cls, role: Types.Role): boolean
 
 	local opponent = self.getOpponent(role)
 
+	
 	local advance_cleared = false
 	if self._countdown_thread then
 		advance_cleared = true
@@ -457,12 +530,9 @@ function Trade.cancelAdvance(self: cls, role: Types.Role): boolean
 			self.stage
 		)
 
+
 		local chosen_reset_stage
 		for i, reset_stage in advance_cancel_resets do
-			local reset_spot = table.find(
-				stage_order,
-				reset_stage
-			)
 			if i == #advance_cancel_resets then
 				chosen_reset_stage = reset_stage
 				break
@@ -475,17 +545,17 @@ function Trade.cancelAdvance(self: cls, role: Types.Role): boolean
 			end
 		end
 		self.stage = chosen_reset_stage
+		
 	end
 	
 	Remotes.AdvanceCancelled:FireClient(
 		self[opponent],
 		advance_cleared
 	)
-	print(self)
 	return true
 end
 
-function Trade.cancelTrade(self: cls, role: Types.Role?): boolean
+function Trade.cancelTrade(self: cls, code: Constants.TRADE_IDS, role: Types.Role?): boolean
 	if table.find(stage_order, self.stage) > 5 then
 		return false
 	end
@@ -500,45 +570,70 @@ function Trade.cancelTrade(self: cls, role: Types.Role?): boolean
 	if role then
 		local opponent = self.getOpponent(role)
 		Remotes.TradeCancelled:FireClient(
-			self[opponent]
+			self[opponent],
+			code
 		)
 	else
 		Remotes.TradeCancelled:FireClient(
-			self.instigator
+			self.instigator,
+			code
 		)
 		Remotes.TradeCancelled:FireClient(
-			self.buddy
+			self.buddy,
+			code
 		)
 	end
 	self:destroyClass()
-	print(self)
 	return true
 end
 
-function Trade.addToOffer(self: cls, role: Types.Role, asset: string): boolean
+function Trade.addToOffer(self: cls, role: Types.Role, asset: string, amount: number?): boolean
 	print(self.stage)
 	if self.stage ~= "ready" then return false end
 	if #self.offers[role] >= Constants.MAX_OFFERS then return false end
 	
+	amount = amount or 1
 	-- TODO playerdata ownership checks
 
-	print(self:canAdd(role, asset))
-	if not self:canAdd(role, asset) then return false end
+	print(self:canAdd(role, asset, amount))
+	if not self:canAdd(role, asset, amount) then return false end
+	
 	
 	local asset_type = self.findAssetType(asset)
 	local asset_value = self.calcAssetValue(asset, asset_type) or 0
 	
 	local offer: Types.TradeOffer = {
 		asset = asset,
-		type = asset_type
+		type = asset_type,
+		amount = amount
 	}
 	
-	table.insert(
-		self.offers[role],
-		offer
-	)
-	self.offers_value[role] += asset_value
+	local found = false
+	for index, local_offer: Types.TradeOffer in self.offers[role] do
+		if local_offer.asset == asset then
+			found = index
+			break
+		end
+	end
+
+	if not found then
+		table.insert(
+			self.offers[role],
+			offer
+		)
+	else
+		self.offers[role][found].amount += amount
+	end
+
+	self.offers_value[role] += (asset_value * amount)
 	
+	if asset_type == "unit" then
+		if role == "buddy" then
+			self.instigator_unit_size_left -= 1
+		elseif role == "instigator" then
+			self.buddy_unit_size_left -= 1
+		end
+	end
 	
 	self.cooldown:apply(
 		self.instigator
@@ -553,22 +648,40 @@ function Trade.addToOffer(self: cls, role: Types.Role, asset: string): boolean
 		offer
 	)
 
-	print(self)
 	return true
 end
-function Trade.removefromOffer(self: cls, role: Types.Role, asset: string): boolean
+function Trade.removefromOffer(self: cls, role: Types.Role, asset: string, amount: number?): boolean
 	if self.stage ~= "ready" then return false end
+
+	amount = amount or 1
 
 	local asset_type = self.findAssetType(asset)
 	local asset_value = self.calcAssetValue(asset, asset_type) or 0
 
-	for index, offer in self.offers[role] do
+	for index, offer: Types.TradeOffer in self.offers[role] do
 		if offer.asset == asset then
-			table.remove(
-				self.offers[role],
-				index
-			)
-			self.offers_value[role] -= asset_value
+			if amount > offer.amount then -- is client trying to delete more in the offer than actually exist?
+				amount = offer.amount
+			end
+			
+			offer.amount -= amount
+
+			if offer.amount == 0 then
+				table.remove(
+					self.offers[role],
+					index
+				)
+			end
+
+			self.offers_value[role] -= asset_value * amount
+			
+			if asset_type == "unit" then
+				if role == "buddy" then
+					self.instigator_unit_size_left += 1
+				elseif role == "instigator" then
+					self.buddy_unit_size_left += 1
+				end
+			end
 			
 			self.cooldown:apply(
 				self.instigator
@@ -580,14 +693,12 @@ function Trade.removefromOffer(self: cls, role: Types.Role, asset: string): bool
 			local opponent = self.getOpponent(role)
 			Remotes.AssetRemoved:FireClient(
 				self[opponent],
-				offer
+				offer -- return active offer state, NOT change
 			)
 
-			print(self)
 			return true
 		end
 	end
-	print(self)
 	return false
 end
 
