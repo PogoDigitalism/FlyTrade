@@ -198,8 +198,7 @@ function Trade.destroyClass(self: cls)
 	
 	if self.role_data.buddy.trading then
 		self.role_data.buddy.trading = false
-	end
-		
+	end	
 	self.role_data.instigator.trading = false
 
 	self.in_progress = false
